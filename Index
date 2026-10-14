@@ -1,0 +1,262 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Cotizador de Viajes</title>
+    <!-- Leaflet CSS -->
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+    <style>
+        * { box-sizing: border-box; margin: 0; padding: 0; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; }
+        body { display: flex; height: 100vh; background-color: #f4f4f9; color: #333; }
+        
+        #sidebar {
+            width: 400px;
+            background: #fff;
+            box-shadow: 2px 0 10px rgba(0,0,0,0.1);
+            display: flex;
+            flex-direction: column;
+            z-index: 1000;
+            padding: 20px;
+            overflow-y: auto;
+        }
+
+        h2 { margin-bottom: 20px; color: #2c3e50; font-size: 24px; text-align: center; }
+
+        .form-group { margin-bottom: 15px; position: relative; }
+        label { display: block; margin-bottom: 5px; font-weight: 600; color: #555; font-size: 14px; }
+        input, select {
+            width: 100%;
+            padding: 10px;
+            border: 1px solid #ddd;
+            border-radius: 6px;
+            font-size: 14px;
+            outline: none;
+            transition: border-color 0.3s;
+        }
+        input:focus { border-color: #3498db; }
+
+        .suggestions {
+            position: absolute;
+            top: 100%;
+            left: 0;
+            right: 0;
+            background: #fff;
+            border: 1px solid #ddd;
+            border-top: none;
+            border-radius: 0 0 6px 6px;
+            max-height: 150px;
+            overflow-y: auto;
+            z-index: 2000;
+        }
+        .suggestion-item {
+            padding: 8px 12px;
+            cursor: pointer;
+            font-size: 13px;
+        }
+        .suggestion-item:hover { background: #f1f1f1; }
+
+        .btn {
+            background-color: #27ae60;
+            color: white;
+            border: none;
+            padding: 12px;
+            width: 100%;
+            border-radius: 6px;
+            font-size: 16px;
+            font-weight: bold;
+            cursor: pointer;
+            transition: background 0.3s;
+            margin-top: 10px;
+        }
+        .btn:hover { background-color: #219653; }
+
+        #resultado {
+            margin-top: 20px;
+            padding: 15px;
+            background: #eaf2f8;
+            border-radius: 6px;
+            border-left: 4px solid #3498db;
+            display: none;
+        }
+        #resultado h3 { margin-bottom: 10px; color: #2980b9; font-size: 18px; }
+        #resultado p { margin-bottom: 5px; font-size: 14px; }
+
+        #map { flex-grow: 1; height: 100%; }
+
+        @media (max-width: 768px) {
+            body { flex-direction: column-reverse; }
+            #sidebar { width: 100%; height: 50vh; }
+            #map { height: 50vh; }
+        }
+    </style>
+</head>
+<body>
+
+    <div id="sidebar">
+        <h2>Cotizador de Viajes</h2>
+        
+        <div class="form-group">
+            <label for="origen">Origen:</label>
+            <input type="text" id="origen" placeholder="Ingresa la dirección de salida" autocomplete="off">
+            <div id="suggestions-origen" class="suggestions"></div>
+        </div>
+
+        <div class="form-group">
+            <label for="destino">Destino:</label>
+            <input type="text" id="destino" placeholder="Ingresa la dirección de destino" autocomplete="off">
+            <div id="suggestions-destino" class="suggestions"></div>
+        </div>
+
+        <div class="form-group">
+            <label for="fecha">Fecha y Hora:</label>
+            <input type="datetime-local" id="fecha">
+        </div>
+
+        <button class="btn" onclick="calcularRuta()">Cotizar Viaje</button>
+
+        <div id="resultado">
+            <h3>Detalle del Viaje</h3>
+            <p id="res-distancia"></p>
+            <p id="res-duracion"></p>
+            <p id="res-precio" style="font-weight: bold; font-size: 16px; color: #27ae60;"></p>
+            <p style="font-size: 13px; color: #555; margin-top: 5px;">Alias de pago: <strong>mipago.app</strong></p>
+            <button class="btn" style="background-color: #25d366; margin-top: 10px;" onclick="enviarWhatsApp()">Reservar por WhatsApp</button>
+        </div>
+    </div>
+
+    <div id="map"></div>
+
+    <!-- Leaflet JS -->
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+    <script>
+        const PRECIO_KM = 1500;
+
+        // Inicializar mapa centrado en Buenos Aires
+        const map = L.map('map').setView([-34.6037, -58.3816], 13);
+        L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+            maxZoom: 19,
+            attribution: '&copy; OpenStreetMap contributors'
+        }).addTo(map);
+
+        let markerOrigen = null;
+        let markerDestino = null;
+        let routeLayer = null;
+        let datosViaje = {};
+
+        // Autocompletado genérico con Nominatim
+        function setupAutocomplete(inputId, suggestionsId, isOrigen) {
+            const input = document.getElementById(inputId);
+            const suggestionsBox = document.getElementById(suggestionsId);
+            let timeout = null;
+
+            input.addEventListener('input', function() {
+                clearTimeout(timeout);
+                const query = this.value;
+                if (query.length < 3) {
+                    suggestionsBox.innerHTML = '';
+                    return;
+                }
+
+                timeout = setTimeout(() => {
+                    fetch(`https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(query)}&countrycodes=ar`)
+                        .then(response => response.json())
+                        .then(data => {
+                            suggestionsBox.innerHTML = '';
+                            data.forEach(item => {
+                                const div = document.createElement('div');
+                                div.className = 'suggestion-item';
+                                div.textContent = item.display_name;
+                                div.addEventListener('click', () => {
+                                    input.value = item.display_name;
+                                    suggestionsBox.innerHTML = '';
+                                    const latLng = [item.lat, item.lon];
+                                    if (isOrigen) {
+                                        if (markerOrigen) map.removeLayer(markerOrigen);
+                                        markerOrigen = L.marker(latLng).addTo(map).bindPopup('Origen').openPopup();
+                                    } else {
+                                        if (markerDestino) map.removeLayer(markerDestino);
+                                        markerDestino = L.marker(latLng).addTo(map).bindPopup('Destino').openPopup();
+                                    }
+                                    if (markerOrigen && markerDestino) {
+                                        map.fitBounds(L.featureGroup([markerOrigen, markerDestino]).getBounds(), {padding: [50, 50]});
+                                    }
+                                });
+                                suggestionsBox.appendChild(div);
+                            });
+                        });
+                }, 400);
+            });
+        }
+
+        setupAutocomplete('origen', 'suggestions-origen', true);
+        setupAutocomplete('destino', 'suggestions-destino', false);
+
+        async function calcularRuta() {
+            const origenTxt = document.getElementById('origen').value;
+            const destinoTxt = document.getElementById('destino').value;
+            const fecha = document.getElementById('fecha').value;
+
+            if (!origenTxt || !destinoTxt) {
+                alert('Por favor completa origen y destino.');
+                return;
+            }
+
+            try {
+                // Obtener coordenadas de origen
+                const res1 = await fetch(`https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(origenTxt)}&limit=1`);
+                const data1 = await res1.json();
+                if (data1.length === 0) { alert('No se encontró la dirección de origen.'); return; }
+                const coordsOrigen = [parseFloat(data1[0].lon), parseFloat(data1[0].lat)];
+
+                // Obtener coordenadas de destino
+                const res2 = await fetch(`https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(destinoTxt)}&limit=1`);
+                const data2 = await res2.json();
+                if (data2.length === 0) { alert('No se encontró la dirección de destino.'); return; }
+                const coordsDestino = [parseFloat(data2[0].lon), parseFloat(data2[0].lat)];
+
+                // Calcular ruta mediante OSRM
+                const osrmRes = await fetch(`https://router.project-osrm.org/route/v1/driving/${coordsOrigen[0]},${coordsOrigen[1]};${coordsDestino[0]},${coordsDestino[1]}?overview=full&geometries=geojson`);
+                const osrmData = await osrmRes.json();
+
+                if (osrmData.code !== 'Ok') { alert('No se pudo calcular la ruta.'); return; }
+
+                const route = osrmData.routes[0];
+                const distanciaKm = (route.distance / 1000).toFixed(2);
+                const duracionMin = Math.round(route.duration / 60);
+                const precioTotal = Math.round(distanciaKm * PRECIO_KM);
+
+                // Dibujar línea en el mapa
+                if (routeLayer) map.removeLayer(routeLayer);
+                routeLayer = L.geoJSON(route.geometry, { style: { color: '#3498db', weight: 5 } }).addTo(map);
+
+                // Mostrar resultados
+                document.getElementById('res-distancia').textContent = `Distancia: ${distanciaKm} km`;
+                document.getElementById('res-duracion').textContent = `Duración estimada: ${duracionMin} minutos`;
+                document.getElementById('res-precio').textContent = `Total a Pagar: $${precioTotal.toLocaleString('es-AR')}`;
+                document.getElementById('resultado').style.display = 'block';
+
+                datosViaje = {
+                    origen: origenTxt,
+                    destino: destinoTxt,
+                    distancia: distanciaKm,
+                    duracion: duracionMin,
+                    precio: precioTotal,
+                    fecha: fecha ? new Date(fecha).toLocaleString() : 'Inmediato'
+                };
+
+            } catch (error) {
+                console.error(error);
+                alert('Ocurrió un error al calcular el viaje.');
+            }
+        }
+
+        function enviarWhatsApp() {
+            if (!datosViaje.precio) return;
+            const mensaje = `Hola, quiero solicitar un viaje:\n- Origen: ${datosViaje.origen}\n- Destino: ${datosViaje.destino}\n- Distancia: ${datosViaje.distancia} km\n- Fecha/Hora: ${datosViaje.fecha}\n- Total: $${datosViaje.precio.toLocaleString('es-AR')}\n- Alias de pago: mipago.app`;
+            const url = `https://api.whatsapp.com/send?phone=&text=${encodeURIComponent(mensaje)}`;
+            window.open(url, '_blank');
+        }
+    </script>
+</body>
+</html>
